@@ -1,0 +1,40 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-library}
+      MYSQL_USER: ${MYSQL_USER:-library}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请设置 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请设置 MYSQL_ROOT_PASSWORD}
+      TZ: UTC
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_0900_as_ci, --default-time-zone=+00:00]
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -h 127.0.0.1 -u "$$MYSQL_USER" -D "$$MYSQL_DATABASE" -e "SELECT 1" >/dev/null 2>&1']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  db-test:
+    image: mysql:8.4
+    profiles: [test]
+    environment:
+      MYSQL_DATABASE: library_test
+      MYSQL_USER: library_test
+      MYSQL_PASSWORD: ${MYSQL_TEST_PASSWORD:-}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_TEST_ROOT_PASSWORD:-}
+      TZ: UTC
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_0900_as_ci, --default-time-zone=+00:00]
+    ports:
+      - "127.0.0.1:${MYSQL_TEST_PORT:-3307}:3306"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -h 127.0.0.1 -u "$$MYSQL_USER" -D library_test -e "SELECT 1" >/dev/null 2>&1']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  mysql_data:
