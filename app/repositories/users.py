@@ -24,12 +24,13 @@ class UserRepository:
 
     async def lock_admins(self) -> list[User]:
         # 所有角色/状态写入遵循同一顺序：管理员按主键升序，再锁目标用户。
+        # 防止死锁
         result = await self.session.scalars(
             select(User)
             .where(User.role == Role.ADMIN)
             .order_by(User.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+            .with_for_update() # 显式向数据库申请 SELECT ... FOR UPDATE 排他锁（Exclusive Lock）
+            .execution_options(populate_existing=True) 
         )
         return list(result)
 

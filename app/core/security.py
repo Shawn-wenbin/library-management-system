@@ -33,6 +33,14 @@ def create_access_token(user_id: int, settings: Settings) -> str:
     )
 
 
+'''
+做 5 重校验 ，任何一个过不了都抛 401：
+1. 签名对不对？（防止伪造）
+2. 过期没？（`exp` claim）
+3. 签发者是不是自己？（`iss` 必须匹配`JWT_ISSUER` ）
+4. 受众对不对？（`aud` 必须匹配`JWT_AUDIENCE` ）
+5. `sub` claim 是有效的 int 用户 ID 吗？
+'''
 def decode_access_token(token: str, settings: Settings) -> int:
     try:
         payload = jwt.decode(

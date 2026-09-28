@@ -14,8 +14,8 @@ from app.core.config import Settings
 def create_engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(
         settings.database_url.get_secret_value(),
-        pool_pre_ping=True,
-        pool_recycle=1800,
+        pool_pre_ping=True, # 在借连接时探活，防止拿到"看似活着其实已经被 MySQL 掐断"的死连接
+        pool_recycle=1800, # 连接池回收时间，单位秒
         isolation_level="READ COMMITTED",
         hide_parameters=True,
         connect_args={"init_command": "SET time_zone = '+00:00'", "connect_timeout": 5},
