@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import auth, health, users
+from app.api import auth, catalog, health, users
 from app.core.config import Settings
 from app.core.errors import register_error_handlers
 from app.core.security import hash_password
@@ -39,6 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(health.router)
     application.include_router(auth.router, prefix="/api/v1")
     application.include_router(users.router, prefix="/api/v1")
+    application.include_router(catalog.router, prefix="/api/v1")
     return application
 
 

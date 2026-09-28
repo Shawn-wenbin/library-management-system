@@ -1,6 +1,6 @@
 # 异步图书管理系统
 
-当前仅交付 Phase 1：基础工程、用户认证与管理。需求以 [PROJECT_SPEC](docs/PROJECT_SPEC.md) 为准，开发约定见 [AGENTS.md](AGENTS.md)。图书、作者、分类、馆藏、借阅留待后续阶段；不包含预约、报表或 AI 功能。
+当前已交付 Phase 1–2：基础工程、用户认证、图书目录及实体馆藏管理。需求以 [PROJECT_SPEC](docs/PROJECT_SPEC.md) 为准，开发约定见 [AGENTS.md](AGENTS.md)。借阅归还留待 Phase 3；不包含预约、报表或 AI 功能。
 
 ## 本地启动
 
@@ -32,6 +32,20 @@ curl http://127.0.0.1:8000/health/ready
 
 Swagger 文档：<http://127.0.0.1:8000/docs>。先调用注册/登录接口，复制登录结果中的 `access_token` 到 Authorize 的 Bearer 输入框，再调用受保护接口。`/health` 无需数据库可用；`/health/ready` 执行数据库探测，连接故障返回 503。这不是迁移版本检查。
 
+## 开发模拟数据
+
+在本机开发库完成 `0002_catalog` 迁移后运行（库名按 `.env` 的 `DATABASE_URL` 填写）：
+
+```bash
+uv run python -m scripts.seed_dev --database library
+```
+
+脚本追加 5 个示例分类、10 位虚构作者、24 本虚构图书、69 册馆藏，涵盖多作者、分页、无库存、无可借副本、下架及 AVAILABLE/MAINTENANCE/LOST/RETIRED 状态。ISBN 为校验位合法的模拟号码，不代表真实出版物；馆藏条码使用 `MOCK-` 前缀。已有用户不变，不生成借阅记录或 BORROWED 副本。
+
+整批写入使用一个事务，失败则回滚；按分类名、作者简介标识和 ISBN 识别样例，重复运行跳过已有记录，不重置编辑后的字段，也不补回已有书目被删除的副本。ISBN 被非样例书目占用或条码冲突会终止并回滚。仅允许连接本机地址，且实际数据库名必须与 `--database` 一致；不自动建表、迁移或清空数据。
+
+启动 API 后，可访问 `/api/v1/books?page_size=5`、`/api/v1/books?keyword=Python` 和 `/api/v1/books?available_only=true` 验证；下架图书及馆藏明细使用管理员身份查询。
+
 ## Phase 1 接口
 
 以下接口使用 `/api/v1` 前缀，请求体都是 JSON：
@@ -50,13 +64,40 @@ Swagger 文档：<http://127.0.0.1:8000/docs>。先调用注册/登录接口，�
 
 错误格式统一为 `{"code": "...", "message": "...", "details": null}`。参数错误的 `details` 只包含字段位置和错误类型，不回显原始输入。未登录/无效凭证 401，权限不足 403，不存在 404，唯一性或最后管理员等业务冲突 409，参数错误 422。
 
+## Phase 2 接口与验证
+
+路径均带 `/api/v1` 前缀。公开可访问图书、作者、分类；写入和实体副本明细需要管理员。
+
+- `GET/POST /categories`，`PATCH/DELETE /categories/{id}`：分类列表、新增、修改和无关联删除。
+- `GET/POST /authors`，`GET/PATCH/DELETE /authors/{id}`：作者分页和管理；允许重名，关联图书时拒绝删除。
+- `GET/POST /books`，`GET/PATCH/DELETE /books/{id}`：图书分页、详情和管理。DELETE 只下架，PATCH `is_active=true` 可重新上架。
+- `GET/POST /books/{id}/copies`：管理员分页查询/新增实体副本；列表可传 `status`。
+- `GET/PATCH /copies/{id}`：管理员读取副本及修改 `location/acquired_at`。
+- `PATCH /copies/{id}/status`：管理员提交 `status`；借出状态的流转返回 409。
+
+图书搜索参数：`keyword`（书名/ISBN/作者姓名，百分号和下划线按字面搜索）、`category_id`、`author_id`、`available_only`。排序使用 `sort_by=id|title|publication_date|created_at`、`sort_order=asc|desc`，默认 ID 升序；同值按 ID 同方向排序。图书、作者及副本列表返回 `items/total/page/page_size`，默认 1/20、最大每页 100；分类返回数组。
+
+图书默认只查上架记录，管理员也需显式传 `is_active=false` 才能查看下架列表/详情。该参数为 false 时会检查当前账号状态和管理员权限。公开响应含分类、作者、`total_copies/available_copies`，不包含馆藏条码和位置。总数包含所有状态副本，可借数仅包含 AVAILABLE，下架图书可借数为 0。
+
+通过 Swagger 按以下顺序可验证完整流程：
+
+1. 用管理员登录，创建分类 `{"name":"计算机"}` 和作者 `{"name":"示例作者"}`，保存返回 ID。
+2. 创建图书 `{"title":"示例图书","category_id":1,"author_ids":[1],"isbn":"978-0-306-40615-7"}`，将示例 ID 替换为实际值。
+3. 对图书新增两个副本：`{"barcode":"BOOK-001","location":"A1"}`、`{"barcode":"BOOK-002"}`；详情应显示总数 2、可借数 2。
+4. 将其中一册状态改为 MAINTENANCE，详情可借数应为 1；公开查询不会返回条码。
+5. DELETE 下架图书，公开详情返回 404；管理员加 `?is_active=false` 可看到记录及两册馆藏，关联作者/分类仍不能删除。
+
+创建副本只接受 `barcode/location/acquired_at`，状态固定 AVAILABLE。条码唯一且不可修改；AVAILABLE、MAINTENANCE、LOST、RETIRED 之间允许变更和同状态幂等操作，允许撤销注销。接口拒绝以 BORROWED 为来源或目标；本阶段没有借阅业务和副本删除接口。
+
+图书 `author_ids` 默认为空、不能重复、最多 100 个；PATCH 空数组解除全部作者关系。ISBN 允许 null，提供时须为有效 ISBN-13，保存前去除空白与连字符。PATCH 省略字段保持原值、可选字段可置空，必填字段不能为 null；空对象及未知字段返回 422。姓名、标题、条码去除首尾空白，封面地址只允许 HTTP(S)；作者简介和图书描述最多 16000 字符。
+
 ## 认证与事务设计
 
 调用链为 `api → services → repositories → models/MySQL`。对 Java 开发者而言，Service 对应业务/事务层，Repository 对应 DAO；区别在于数据库操作必须显式 `await`，同一 Session 不能在并发任务间共享。
 
 - 应用 lifespan 创建 Engine 和 Session 工厂，退出时 `dispose()`；依赖通过 `async with` 为每个请求创建/关闭独立 Session。引擎使用 `mysql+asyncmy`、连接存活检查、`READ COMMITTED` 隔离级别。
 - 鉴权读取触发 SQLAlchemy autobegin 后，写 Service 接续同一事务；成功一次 `commit()`，异常（包括取消）回滚。Repository 只查询/flush，不提交、回滚或关闭 Session；只读请求关闭 Session 时结束事务。
-- `expire_on_commit=False` 和显式响应 Schema 避免提交后隐式 IO。Phase 1 没有 ORM 关系；后续阶段需要在 Repository 中显式加载关系，不能依赖异步 lazy load。
+- `expire_on_commit=False` 和显式响应 Schema 避免提交后隐式 IO。目录关系配置 `lazy="raise"`，Repository 用 `selectinload` 显式加载分类与作者，库存按当前页书目批量聚合，避免逐本查询副本。
 - 用户名/邮箱唯一性由数据库约束最终裁决，并发重复写入映射为 409。所有角色/状态变更先按主键锁定管理员集合，再锁定目标；重新检查操作者及有效管理员数量，防止同时移除全部管理员。此低频管理操作会串行执行，未引入全局锁表或重试框架。
 - Argon2 哈希和校验在线程池执行。改密先完成 CPU 运算再锁用户行，并比较原哈希，防止两个改密请求覆盖彼此。
 - Python 时间使用带 UTC 时区的 datetime，MySQL 连接时区固定 UTC；类型适配器负责 DATETIME(6) 时区转换。创建时间使用数据库默认值，更新时间由应用以 UTC 写入；直接手工 SQL 更新不自动维护更新时间。
@@ -81,14 +122,14 @@ docker compose --profile test up -d --wait db-test
 TEST_DATABASE_RESET=1 uv run python -m scripts.test_mysql
 ```
 
-运行器先打印不含口令的目标主机/端口/数据库，验证驱动、`_test` 后缀以及与开发库的隔离，再执行 Alembic upgrade head，最后运行全部 pytest。`TEST_DATABASE_RESET=1` 明确允许测试前后清空该测试库的 `users` 表；不允许对日常使用的数据库设置此变量。测试还检查实际 `SELECT DATABASE()` 和迁移版本。测试服务使用 tmpfs，与开发数据库的数据卷分开；停止/重建测试容器后数据可能丢失。不支持多个 pytest 进程共享同一个测试库。
+运行器先打印不含口令的目标主机/端口/数据库，验证驱动、`_test` 后缀以及与开发库的隔离，再执行 Alembic upgrade head，最后运行全部 pytest。`TEST_DATABASE_RESET=1` 明确允许测试前后按外键顺序清空该测试库的 `book_copies/book_authors/books/authors/categories/users` 表；不允许对日常使用的数据库设置此变量。测试还检查实际 `SELECT DATABASE()` 和迁移版本。测试服务使用 tmpfs，与开发数据库的数据卷分开；停止/重建测试容器后数据可能丢失。不支持多个 pytest 进程共享同一个测试库。
 
 单独执行 `uv run pytest` 且没有 `TEST_DATABASE_URL` 时，MySQL 集成用例会明确 skip，不能据此宣称完整验收通过。运行器会从 `.env` 读取测试配置；直接运行 pytest 时应使用 `uv run --env-file .env pytest` 或导出环境变量。
 
-测试覆盖注册/登录、输入校验、敏感信息隔离、角色/资源访问入口、禁用旧 Token、密码/资料修改、初始化幂等、唯一冲突、事务失败回滚、并发重复注册和最后管理员保护。并发用例通过独立 HTTP 客户端和独立请求 Session 运行，并查询最终数据库状态。
+测试覆盖注册/登录、输入校验、敏感信息隔离、角色/资源访问入口、禁用旧 Token、密码/资料修改、初始化幂等、唯一冲突、事务失败回滚、并发重复注册和最后管理员保护。并发用例通过独立 HTTP 客户端和独立请求 Session 运行，并查询最终数据库状态。Phase 2 追加多作者/多副本、搜索分页、上下架、关联删除保护、ISBN/条码校验、全部管理员接口权限、并发唯一冲突、持锁状态更新和事务回滚测试。
 
 ## 目录与后续阶段
 
-`app/api/` 负责 HTTP 和依赖；`app/services/` 实现事务与规则；`app/repositories/` 查询写库；`app/models/` 表映射；`app/schemas/` 请求/响应；`app/core/` 配置/认证/错误；`app/db/` 数据库资源与 UTC 类型。`alembic/` 只有 users 初始迁移，`scripts/` 提供管理员初始化与安全测试入口，`tests/` 区分单元和集成测试。
+`app/api/` 负责 HTTP 和依赖；`app/services/` 实现事务与规则；`app/repositories/` 查询写库；`app/models/` 表映射；`app/schemas/` 请求/响应；`app/core/` 配置/认证/错误；`app/db/` 数据库资源与 UTC 类型。`alembic/` 包含 users 初始迁移及目录/馆藏的 `0002_catalog` 迁移，`scripts/` 提供管理员初始化与安全测试入口，`tests/` 区分单元和集成测试。
 
-规范审查、实施范围和本次运行记录见 [Phase 1 记录](docs/PHASE1.md)。下一阶段建议按既定规范实施目录与实体馆藏，不提前添加借阅、预约或统计功能。
+实施及验证记录见 [Phase 1](docs/PHASE1.md) 和 [Phase 2](docs/PHASE2.md)。下一阶段为借阅归还与并发一致性，等待明确指令后实施。

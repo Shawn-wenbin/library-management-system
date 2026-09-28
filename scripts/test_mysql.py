@@ -28,7 +28,10 @@ def main() -> int:
     load_dotenv()
     url = os.getenv("TEST_DATABASE_URL")
     if not url or os.getenv("TEST_DATABASE_RESET") != "1":
-        print("请设置 TEST_DATABASE_URL 和 TEST_DATABASE_RESET=1；后者确认允许清空测试 users 表")
+        print(
+            "请设置 TEST_DATABASE_URL 和 TEST_DATABASE_RESET=1；"
+            "后者确认允许清空测试库的用户、目录及馆藏表"
+        )
         return 1
     try:
         assert_test_database(url)

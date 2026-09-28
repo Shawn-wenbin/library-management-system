@@ -6,6 +6,7 @@ from alembic import context
 from app.core.config import Settings
 from app.db.base import Base
 from app.db.session import create_engine
+from app.models import catalog  # noqa: F401
 from app.models.user import User  # noqa: F401
 
 target_metadata = Base.metadata
