@@ -49,9 +49,28 @@ class CatalogService:
     async def categories(self) -> list[Category]:
         return await self.repository.categories()
 
+    '''
+    `model_dump()` 将 Pydantic 对象转换成字典，`**` 再把字典展开成关键字参数。例如：
+
+    ```
+    data.model_dump()
+    # 得到 {"name": "计算机", "description": "计算机相关书籍"}
+    ```
+
+    因此，这行等价于：
+
+    ```
+    category = Category(
+        name="计算机",
+        description="计算机相关书籍",
+    )
+    ```
+    '''
+
     async def create_category(self, data: CategoryCreate) -> Category:
         async with self.write_transaction("CATEGORY_EXISTS"):
             category = Category(**data.model_dump())
+            # 当你要把 `model_dump()` 得到的字典，作为关键字参数传给函数或构造方法时，就在前面加**。
             await self.repository.add(category)
         return category
 
@@ -95,6 +114,7 @@ class CatalogService:
             if author is None:
                 raise AppError(404, "AUTHOR_NOT_FOUND", "作者不存在")
             for field, value in data.model_dump(exclude_unset=True).items():
+                # exclude_unset = true 过滤掉未显示穿参的字段
                 setattr(author, field, value)
             await self.repository.flush()
         return author

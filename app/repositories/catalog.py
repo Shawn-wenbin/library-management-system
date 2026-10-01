@@ -65,6 +65,7 @@ class CatalogRepository:
             select(Book)
             .where(Book.id == entity_id)
             .options(selectinload(Book.category), selectinload(Book.authors))
+            # 自动预加载`category` 和`authors` 关联
         )
         if lock:
             query = query.with_for_update().execution_options(populate_existing=True)
@@ -74,11 +75,11 @@ class CatalogRepository:
         self,
         page: int,
         page_size: int,
-        keyword: str | None,
-        category_id: int | None,
-        author_id: int | None,
-        available_only: bool,
-        is_active: bool,
+        keyword: str | None,     # None = 不做关键词搜索
+        category_id: int | None, # None = 不按分类过滤
+        author_id: int | None,   # None = 不按作者过滤
+        available_only: bool,    # True = 仅显示"至少有一本可借副本"的书
+        is_active: bool,         # True = 只看已上架；False = 管理员看下架的
         sort_by: SortBy,
         sort_order: SortOrder,
     ) -> tuple[list[Book], int]:
@@ -96,9 +97,10 @@ class CatalogRepository:
         if author_id is not None:
             predicates.append(Book.authors.any(Author.id == author_id))
         if available_only:
-            predicates.extend(
-                [Book.is_active.is_(True), Book.copies.any(BookCopy.status == CopyStatus.AVAILABLE)]
-            )
+            predicates.extend([
+                Book.is_active.is_(True),
+                Book.copies.any(BookCopy.status == CopyStatus.AVAILABLE)
+            ])
         total = await self.session.scalar(select(func.count(Book.id)).where(*predicates))
         # 排序只从明确的列白名单中选择，并以主键稳定分页。
         column = {
