@@ -1,13 +1,7 @@
-import logging
-
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
-from starlette.middleware.base import RequestResponseEndpoint
-from starlette.responses import Response
-
-logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
@@ -44,15 +38,3 @@ def register_error_handlers(app: FastAPI) -> None:
             content={"code": "HTTP_ERROR", "message": "请求无法处理", "details": None},
             headers=exc.headers,
         )
-
-    @app.middleware("http")
-    async def unexpected_handler(request: Request, call_next: RequestResponseEndpoint) -> Response:
-        try:
-            return await call_next(request)
-        except Exception as exc:
-            # 在服务器重抛并记录堆栈前截获异常，只记录不含输入值的类型。
-            logger.error("未处理异常：%s", type(exc).__name__)
-            return JSONResponse(
-                status_code=500,
-                content={"code": "INTERNAL_ERROR", "message": "服务暂时不可用", "details": None},
-            )

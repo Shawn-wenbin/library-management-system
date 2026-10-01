@@ -1,6 +1,6 @@
 # 异步图书管理系统
 
-当前已交付 Phase 1–3：基础工程、用户认证、图书目录、实体馆藏及借阅归还。需求以 [PROJECT_SPEC](docs/PROJECT_SPEC.md) 为准，开发约定见 [AGENTS.md](AGENTS.md)。包含真实 MySQL 事务与并发控制；不包含预约、报表或 AI 功能。
+当前已交付 Phase 1–4：基础工程、用户认证、图书目录、实体馆藏、借阅归还及工程化收尾。需求以 [PROJECT_SPEC](docs/PROJECT_SPEC.md) 为准，开发约定见 [AGENTS.md](AGENTS.md)。包含真实 MySQL 事务与并发控制；不包含预约、报表或 AI 功能。
 
 ## 本地启动
 
@@ -17,11 +17,14 @@ cp .env.example .env
 uv run python -c 'import secrets; print(secrets.token_urlsafe(48))'
 docker compose up -d --wait db
 uv run alembic upgrade head
+uv run alembic current
 uv run python -m scripts.init_admin
 uv run uvicorn app.main:app --reload
 ```
 
 初始化前在 `.env` 中填写 `ADMIN_USERNAME`、`ADMIN_EMAIL`；`ADMIN_PASSWORD` 可以留空，由脚本在终端隐藏输入并二次确认。非交互模式必须设置密码环境变量。脚本只创建新管理员；同名、同邮箱且启用的管理员已存在时成功退出，不重设密码。同名读者、禁用账号或不匹配邮箱会报冲突，不会擅自提权或恢复账号。请只在受保护的本地终端执行。
+
+空库迁移依次建立 `0001_users → 0002_catalog → 0003_loans`，`alembic current` 应显示 `0003_loans (head)`；已有库执行 upgrade head 会保留数据并仅应用缺少的迁移。可运行 `uv run alembic check` 核对模型与迁移是否一致。Phase 4 没有表结构变更，不新增迁移版本。
 
 数据库容器仅绑定本机回环地址。开发数据保存在 `mysql_data` 卷；修改 `.env` 中的账号密码不会自动修改已有卷中的 MySQL 账号。应用启动不自动建表或迁移。
 
@@ -117,7 +120,19 @@ uv run python -m scripts.seed_dev --database library
 - Python 时间使用带 UTC 时区的 datetime，MySQL 连接时区固定 UTC；类型适配器负责 DATETIME(6) 时区转换。创建时间使用数据库默认值，更新时间由应用以 UTC 写入；直接手工 SQL 更新不自动维护更新时间。
 - JWT 固定 HS256，校验签名、过期时间、签发时间、签发者、受众、用户 ID。受保护请求每次从数据库获取最新状态/角色，角色变更对后续请求即时生效。
 - 只有 Access Token，无 Refresh Token、撤销表或退出接口；默认有效期 30 分钟，可通过 `JWT_ACCESS_TOKEN_MINUTES` 调整。改密或客户端删除 Token **不会立即吊销已签发 Token**。禁用期间旧 Token 被拒绝，重新启用后未过期 Token 可继续使用。
-- 日志记录应用启停和脱敏错误类型；SQL 参数隐藏，不记录请求体、密码或 Token。更完整的请求 ID/访问日志留在 Phase 4。
+- 日志记录应用启停及下方请求摘要；SQL 参数隐藏，关闭 Uvicorn 原始访问日志，避免原始 URL 和查询参数进入日志。
+
+## 请求日志与定位
+
+应用处理的每个 HTTP 响应包含 `X-Request-ID`，包括 401/403/404/409/422/500/503。客户端可传单个 1–64 位 ASCII 字母、数字、点、下划线、连字符组成的 ID；缺失、不合法或重复传头时生成新的 UUID4 十六进制 ID。它不是认证凭据；不要把密码或个人信息放进该头。
+
+```bash
+curl -i -H 'X-Request-ID: local-health-001' http://127.0.0.1:8000/health
+```
+
+`app.requests` 的日志消息为 JSON，包含 `timestamp`（UTC）、`request_id`、`method`、`route`（框架匹配的路由模板）、`status`、`duration_ms`、`outcome`。路由模板不包含实际路径参数，未匹配路径记为 `<unmatched>`；框架可能返回不含 include_router 前缀的模板，例如 `/auth/register`。耗时包含响应发送与请求内清理时间。正常完成为 `complete`，未处理异常为 `error` 并增加 `error_type`，取消为 `interrupted`；尚未发送响应时状态为 null。请求取消不被转换为成功。
+
+正常及 4xx 摘要为 INFO，5xx/未处理异常为 ERROR。默认 `LOG_LEVEL=INFO`；设为 WARNING/ERROR 后不输出正常请求摘要。异常消息、堆栈、原始 URL、查询参数、请求体、Cookie 和 Authorization 不写入请求日志，错误响应体保持原有格式。请求 ID 仅保存在当前调用及 `request.state`，不会跨并发请求共享。日志输出到标准错误，由运行环境负责收集和轮转；v1 未集成分布式追踪或日志平台。
 
 ## 自动化测试
 
@@ -136,7 +151,7 @@ docker compose --profile test up -d --wait db-test
 TEST_DATABASE_RESET=1 uv run python -m scripts.test_mysql
 ```
 
-运行器先打印不含口令的目标主机/端口/数据库，验证驱动、`_test` 后缀以及与开发库的隔离，再执行 Alembic upgrade head，最后运行全部 pytest。`TEST_DATABASE_RESET=1` 明确允许测试前后按外键顺序清空该测试库的 `loans/book_copies/book_authors/books/authors/categories/users` 表；不允许对日常使用的数据库设置此变量。测试还检查实际 `SELECT DATABASE()` 和迁移版本。测试服务使用 tmpfs，与开发数据库的数据卷分开；停止/重建测试容器后数据可能丢失。不支持多个 pytest 进程共享同一个测试库。
+运行器先打印不含口令的目标主机/端口/数据库，验证驱动、`_test` 后缀以及测试库名称与开发库不同（即使主机或端口不同也拒绝同名，防止主机别名绕过保护），再执行 Alembic upgrade head，最后运行全部 pytest。`TEST_DATABASE_RESET=1` 明确允许测试前后按外键顺序清空该测试库的 `loans/book_copies/book_authors/books/authors/categories/users` 表；不允许对日常使用的数据库设置此变量。测试还检查实际 `SELECT DATABASE()` 和迁移版本。测试服务使用 tmpfs，与开发数据库的数据卷分开；停止/重建测试容器后数据可能丢失。不支持多个 pytest 进程共享同一个测试库。
 
 单独执行 `uv run pytest` 且没有 `TEST_DATABASE_URL` 时，MySQL 集成用例会明确 skip，不能据此宣称完整验收通过。运行器会从 `.env` 读取测试配置；直接运行 pytest 时应使用 `uv run --env-file .env pytest` 或导出环境变量。
 
@@ -144,8 +159,31 @@ TEST_DATABASE_RESET=1 uv run python -m scripts.test_mysql
 
 Phase 3 追加借阅、归还、管理员代办、资源归属、14 天借期、上限/重复/库存冲突、逾期边界与分页、历史外键与状态约束测试。并发用例在独立请求和 Session 到达首次加锁点时同步放行，验证最后一册争抢、第五本额度、同种书重复、重复归还和归还/再借竞争，并检查最终数据库；还验证锁等待后的禁用/降权/下架/维修状态及 flush/commit 失败回滚。
 
-## 目录与后续阶段
+Phase 4 新增请求日志字段和脱敏、请求 ID 生成/验证/并发隔离、错误响应及取消、初始化目标保护、管理员与目录初始化幂等、保留人工修改和已借馆藏、ISBN/条码冲突整批回滚及七张 InnoDB 表检查。初始化集成测试实际执行初始化函数，再经 HTTPX 登录、借阅、归还。
 
-`app/api/` 负责 HTTP 和依赖；`app/services/` 实现事务与规则；`app/repositories/` 查询写库；`app/models/` 表映射；`app/schemas/` 请求/响应；`app/core/` 配置/认证/错误；`app/db/` 数据库资源与 UTC 类型。`alembic/` 包含 users 初始迁移及目录/馆藏的 `0002_catalog` 及借阅表 `0003_loans` 迁移，`scripts/` 提供管理员初始化与安全测试入口，`tests/` 区分单元和集成测试。
+### 从空库验收
 
-实施及验证记录见 [Phase 1](docs/PHASE1.md)、[Phase 2](docs/PHASE2.md) 和 [Phase 3](docs/PHASE3.md)。下一阶段为 Phase 4 工程化收尾，等待明确指令后实施。
+对刚创建且尚未迁移的独立测试服务运行：
+
+```bash
+docker compose --profile test up -d --wait db-test
+TEST_DATABASE_RESET=1 uv run python -m scripts.test_mysql --verify-empty -q
+```
+
+此模式先连接并核对实际数据库名，确认没有任何表或视图，再运行完整 Alembic upgrade head、alembic check 及全部测试。若已有表会拒绝执行，不删除现有表，不自动 downgrade。复用已有测试库时去掉 `--verify-empty`。需要再次验证空库时，可为测试服务使用独立 Compose 项目与未占用端口，同时将 TEST_DATABASE_URL 端口改为相同值；不要使用开发数据卷做空库验收。所有测试库均需独占，不支持并行测试进程共用。
+
+### 常见本地问题与 v1 局限
+
+- 数据库连接失败：检查 `docker compose ps`、端口与 DATABASE_URL，服务健康后再迁移。端口冲突时同时修改 MYSQL_PORT 和 DATABASE_URL；测试服务对应 MYSQL_TEST_PORT 和 TEST_DATABASE_URL。
+- 容器已有数据卷时修改 `.env` 密码不会重建 MySQL 账号，需使用原账号或按 MySQL 管理流程改密；不要为了修复连接删除开发数据卷。
+- `/health` 成功但 `/health/ready` 503：应用进程存在但数据库不可用；ready 为 200 也不代表迁移到 head，另查 `alembic current`。
+- 初始化冲突时核对已有用户名/邮箱/状态；脚本不会自动提权、启用或重设密码。模拟数据为可选开发数据，适合串行执行，不是生产导入工具。
+- 401 时检查 Token 过期、签发配置和账号是否禁用；403 时检查当前角色和借阅归属。用响应头中的 request ID 关联日志，不发送密码或 Token 给排查者。
+- v1 为单馆 API，没有前端、预约、续借、罚款、通知、报表或 AI 模块。关键词查询是普通子串搜索；计数与分页不保证同一快照；事务无自动死锁重试。没有 Refresh Token、即时 Token 撤销、登录限流或 TLS 终止；公开部署需另行配置 HTTPS 和访问控制。日志脱敏以降低诊断细节为代价。
+- 全仓格式检查存在 7 个 Phase 4 开始前即存在的格式问题（详见交付记录）；本阶段变更文件检查通过，未批量格式化无关代码。
+
+## 目录与交付记录
+
+`app/api/` 负责 HTTP 和依赖；`app/services/` 实现事务与规则；`app/repositories/` 查询写库；`app/models/` 表映射；`app/schemas/` 请求/响应；`app/core/` 配置/认证/错误；`app/db/` 数据库资源与 UTC 类型。`alembic/` 包含 users 初始迁移及目录/馆藏的 `0002_catalog` 及借阅表 `0003_loans` 迁移，`scripts/` 提供管理员初始化、可选模拟目录数据与安全测试/空库验收入口，`tests/` 区分单元和集成测试。
+
+实施及验证记录见 [Phase 1](docs/PHASE1.md)、[Phase 2](docs/PHASE2.md)、[Phase 3](docs/PHASE3.md) 和 [Phase 4](docs/PHASE4.md)。v1 分阶段工作已完成；后续功能需另行确定范围。

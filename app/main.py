@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from app.api import auth, catalog, health, loans, users
 from app.core.config import Settings
 from app.core.errors import register_error_handlers
+from app.core.request_logging import RequestLoggingMiddleware
 from app.core.security import hash_password
 from app.db.session import create_engine, create_session_factory
 
@@ -36,6 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(title="图书管理系统", version="0.1.0", lifespan=lifespan)
     register_error_handlers(application)
+    application.add_middleware(RequestLoggingMiddleware)
     application.include_router(health.router)
     application.include_router(auth.router, prefix="/api/v1")
     application.include_router(users.router, prefix="/api/v1")
