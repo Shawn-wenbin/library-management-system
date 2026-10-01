@@ -10,6 +10,7 @@ from sqlalchemy.engine import make_url
 from app.core.config import Settings
 from app.main import create_app
 from app.models.catalog import Author, Book, BookCopy, Category, book_authors
+from app.models.loan import Loan
 from app.models.user import User
 from scripts.test_mysql import assert_test_database
 
@@ -29,9 +30,9 @@ async def client(settings: Settings) -> AsyncIterator[AsyncClient]:
             if actual != make_url(test_url).database:
                 raise RuntimeError("实际连接数据库与测试目标不符")
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision != "0002_catalog":
+            if revision != "0003_loans":
                 raise RuntimeError("请先对独立测试库执行 Alembic upgrade head")
-            for table in (BookCopy, book_authors, Book, Author, Category, User):
+            for table in (Loan, BookCopy, book_authors, Book, Author, Category, User):
                 await session.execute(delete(table))
             await session.commit()
         async with AsyncClient(
@@ -40,6 +41,6 @@ async def client(settings: Settings) -> AsyncIterator[AsyncClient]:
             http.test_app = application
             yield http
         async with application.state.session_factory() as session:
-            for table in (BookCopy, book_authors, Book, Author, Category, User):
+            for table in (Loan, BookCopy, book_authors, Book, Author, Category, User):
                 await session.execute(delete(table))
             await session.commit()

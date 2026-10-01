@@ -1,4 +1,4 @@
-"""迁移明确指定的独立测试库后运行测试；测试会清空该库的 users 表。"""
+"""迁移明确指定的独立测试库后运行测试；测试会清空该库的七张业务表。"""
 
 import os
 import secrets
@@ -30,7 +30,7 @@ def main() -> int:
     if not url or os.getenv("TEST_DATABASE_RESET") != "1":
         print(
             "请设置 TEST_DATABASE_URL 和 TEST_DATABASE_RESET=1；"
-            "后者确认允许清空测试库的用户、目录及馆藏表"
+            "后者确认允许清空测试库的用户、目录、馆藏及借阅表"
         )
         return 1
     try:

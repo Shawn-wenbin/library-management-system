@@ -76,8 +76,8 @@ async def seed(settings: Settings, database: str) -> dict[str, int]:
             if await session.scalar(text("SELECT DATABASE()")) != database:
                 raise ValueError("实际连接数据库与指定开发库不一致")
             revisions = set(await session.scalars(text("SELECT version_num FROM alembic_version")))
-            if revisions != {"0002_catalog"}:
-                raise ValueError("此脚本适用于 0002_catalog 迁移，请先核对迁移状态")
+            if revisions not in ({"0002_catalog"}, {"0003_loans"}):
+                raise ValueError("此脚本适用于 0002_catalog / 0003_loans，请先核对迁移状态")
             repository = CatalogRepository(session)
             categories = []
             for name in CATEGORIES:

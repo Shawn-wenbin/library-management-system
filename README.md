@@ -1,6 +1,6 @@
 # 异步图书管理系统
 
-当前已交付 Phase 1–2：基础工程、用户认证、图书目录及实体馆藏管理。需求以 [PROJECT_SPEC](docs/PROJECT_SPEC.md) 为准，开发约定见 [AGENTS.md](AGENTS.md)。借阅归还留待 Phase 3；不包含预约、报表或 AI 功能。
+当前已交付 Phase 1–3：基础工程、用户认证、图书目录、实体馆藏及借阅归还。需求以 [PROJECT_SPEC](docs/PROJECT_SPEC.md) 为准，开发约定见 [AGENTS.md](AGENTS.md)。包含真实 MySQL 事务与并发控制；不包含预约、报表或 AI 功能。
 
 ## 本地启动
 
@@ -34,7 +34,7 @@ Swagger 文档：<http://127.0.0.1:8000/docs>。先调用注册/登录接口，�
 
 ## 开发模拟数据
 
-在本机开发库完成 `0002_catalog` 迁移后运行（库名按 `.env` 的 `DATABASE_URL` 填写）：
+在本机开发库完成 `alembic upgrade head` 后运行，库名按 `.env` 的 `DATABASE_URL` 填写。脚本兼容 `0002_catalog` 和 `0003_loans`：
 
 ```bash
 uv run python -m scripts.seed_dev --database library
@@ -87,9 +87,23 @@ uv run python -m scripts.seed_dev --database library
 4. 将其中一册状态改为 MAINTENANCE，详情可借数应为 1；公开查询不会返回条码。
 5. DELETE 下架图书，公开详情返回 404；管理员加 `?is_active=false` 可看到记录及两册馆藏，关联作者/分类仍不能删除。
 
-创建副本只接受 `barcode/location/acquired_at`，状态固定 AVAILABLE。条码唯一且不可修改；AVAILABLE、MAINTENANCE、LOST、RETIRED 之间允许变更和同状态幂等操作，允许撤销注销。接口拒绝以 BORROWED 为来源或目标；本阶段没有借阅业务和副本删除接口。
+创建副本只接受 `barcode/location/acquired_at`，状态固定 AVAILABLE。条码唯一且不可修改；AVAILABLE、MAINTENANCE、LOST、RETIRED 之间允许变更和同状态幂等操作，允许撤销注销。馆藏管理接口拒绝以 BORROWED 为来源或目标；借出状态只经下方借还流程变更，不提供副本删除接口。
 
 图书 `author_ids` 默认为空、不能重复、最多 100 个；PATCH 空数组解除全部作者关系。ISBN 允许 null，提供时须为有效 ISBN-13，保存前去除空白与连字符。PATCH 省略字段保持原值、可选字段可置空，必填字段不能为 null；空对象及未知字段返回 422。姓名、标题、条码去除首尾空白，封面地址只允许 HTTP(S)；作者简介和图书描述最多 16000 字符。
+
+## 借阅与归还
+
+1. 登录后 `POST /api/v1/loans`，请求体为 `{"book_id":1}`（替换为实际书目 ID）。服务端选择可借副本，成功返回 201 和借阅详情；应还时间固定为借出时间加 14 天。
+2. `GET /api/v1/loans/me` 查询本人历史；可加 `status=BORROWED` 或 `status=RETURNED` 及 `book_id`。`GET /api/v1/loans/{id}` 查询本人记录详情。
+3. `POST /api/v1/loans/{id}/return` 无需请求体，成功返回 200 和归还后的详情。再次归还返回 409；图书下架仍允许归还。
+4. 管理员可以在借阅请求增加 `user_id` 为目标读者借书，或调用归还接口代还。普通读者传任何 `user_id` 均为 403。管理员同样受目标读者启用、最多五本、同种书只借一本及库存规则限制；允许管理员为已禁用读者归还历史借阅。
+5. 管理员 `GET /api/v1/loans` 支持 `user_id/book_id/status` 筛选；`GET /api/v1/loans/overdue` 返回当前逾期未归还记录，支持 `user_id/book_id`。三个列表均默认 `page=1&page_size=20`、最大每页 100，按 ID 升序。
+
+详情仅返回借阅 ID、用户 ID、书目 ID、副本 ID、借还时间、状态、创建/更新时间及 `is_overdue`；不暴露条码、位置或用户敏感资料。时间统一 UTC；逾期是查询时计算的 `status=BORROWED` 且当前时间严格晚于 `due_at`，数据库不存 OVERDUE 状态。
+
+借还加锁顺序统一为 **目标用户 → 书目 → 副本 → 已有借阅记录**。用户锁内检查五本上限及同种书重复借阅；书目共享锁阻止并发下架并兼容馆藏更新的隐式外键共享锁，用户及副本使用排他锁；副本的 `SELECT ... FOR UPDATE` 协调库存与管理状态变化。归还前的普通读取只用于定位不可变外键，加锁后重新读取状态；等待用户锁后刷新操作者权限。只锁一个目标用户，不额外锁代办管理员，避免与既有管理员集合锁顺序形成环。
+
+借阅记录与副本状态同事务提交，异常统一回滚。没有自动重试；同一用户的借还串行化，不同用户可借同一书目的不同副本。借阅列表沿用 READ COMMITTED，计数与分页条目可能反映并发修改的不同时刻，不保证列表快照一致性。
 
 ## 认证与事务设计
 
@@ -122,14 +136,16 @@ docker compose --profile test up -d --wait db-test
 TEST_DATABASE_RESET=1 uv run python -m scripts.test_mysql
 ```
 
-运行器先打印不含口令的目标主机/端口/数据库，验证驱动、`_test` 后缀以及与开发库的隔离，再执行 Alembic upgrade head，最后运行全部 pytest。`TEST_DATABASE_RESET=1` 明确允许测试前后按外键顺序清空该测试库的 `book_copies/book_authors/books/authors/categories/users` 表；不允许对日常使用的数据库设置此变量。测试还检查实际 `SELECT DATABASE()` 和迁移版本。测试服务使用 tmpfs，与开发数据库的数据卷分开；停止/重建测试容器后数据可能丢失。不支持多个 pytest 进程共享同一个测试库。
+运行器先打印不含口令的目标主机/端口/数据库，验证驱动、`_test` 后缀以及与开发库的隔离，再执行 Alembic upgrade head，最后运行全部 pytest。`TEST_DATABASE_RESET=1` 明确允许测试前后按外键顺序清空该测试库的 `loans/book_copies/book_authors/books/authors/categories/users` 表；不允许对日常使用的数据库设置此变量。测试还检查实际 `SELECT DATABASE()` 和迁移版本。测试服务使用 tmpfs，与开发数据库的数据卷分开；停止/重建测试容器后数据可能丢失。不支持多个 pytest 进程共享同一个测试库。
 
 单独执行 `uv run pytest` 且没有 `TEST_DATABASE_URL` 时，MySQL 集成用例会明确 skip，不能据此宣称完整验收通过。运行器会从 `.env` 读取测试配置；直接运行 pytest 时应使用 `uv run --env-file .env pytest` 或导出环境变量。
 
 测试覆盖注册/登录、输入校验、敏感信息隔离、角色/资源访问入口、禁用旧 Token、密码/资料修改、初始化幂等、唯一冲突、事务失败回滚、并发重复注册和最后管理员保护。并发用例通过独立 HTTP 客户端和独立请求 Session 运行，并查询最终数据库状态。Phase 2 追加多作者/多副本、搜索分页、上下架、关联删除保护、ISBN/条码校验、全部管理员接口权限、并发唯一冲突、持锁状态更新和事务回滚测试。
 
+Phase 3 追加借阅、归还、管理员代办、资源归属、14 天借期、上限/重复/库存冲突、逾期边界与分页、历史外键与状态约束测试。并发用例在独立请求和 Session 到达首次加锁点时同步放行，验证最后一册争抢、第五本额度、同种书重复、重复归还和归还/再借竞争，并检查最终数据库；还验证锁等待后的禁用/降权/下架/维修状态及 flush/commit 失败回滚。
+
 ## 目录与后续阶段
 
-`app/api/` 负责 HTTP 和依赖；`app/services/` 实现事务与规则；`app/repositories/` 查询写库；`app/models/` 表映射；`app/schemas/` 请求/响应；`app/core/` 配置/认证/错误；`app/db/` 数据库资源与 UTC 类型。`alembic/` 包含 users 初始迁移及目录/馆藏的 `0002_catalog` 迁移，`scripts/` 提供管理员初始化与安全测试入口，`tests/` 区分单元和集成测试。
+`app/api/` 负责 HTTP 和依赖；`app/services/` 实现事务与规则；`app/repositories/` 查询写库；`app/models/` 表映射；`app/schemas/` 请求/响应；`app/core/` 配置/认证/错误；`app/db/` 数据库资源与 UTC 类型。`alembic/` 包含 users 初始迁移及目录/馆藏的 `0002_catalog` 及借阅表 `0003_loans` 迁移，`scripts/` 提供管理员初始化与安全测试入口，`tests/` 区分单元和集成测试。
 
-实施及验证记录见 [Phase 1](docs/PHASE1.md) 和 [Phase 2](docs/PHASE2.md)。下一阶段为借阅归还与并发一致性，等待明确指令后实施。
+实施及验证记录见 [Phase 1](docs/PHASE1.md)、[Phase 2](docs/PHASE2.md) 和 [Phase 3](docs/PHASE3.md)。下一阶段为 Phase 4 工程化收尾，等待明确指令后实施。
