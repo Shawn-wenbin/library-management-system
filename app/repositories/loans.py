@@ -50,7 +50,7 @@ class LoanRepository:
             .where(BookCopy.book_id == book_id, BookCopy.status == CopyStatus.AVAILABLE)
             .order_by(BookCopy.id)
             .limit(1)
-            .with_for_update()
+            .with_for_update(skip_locked=True)  # 已经被别人锁住的副本直接跳过，瞬间锁定下一个（高并发零等待）
             .execution_options(populate_existing=True)
         )
 
